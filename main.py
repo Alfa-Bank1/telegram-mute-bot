@@ -14,12 +14,12 @@ from telegram.ext import (
     CallbackQueryHandler,
     filters
 )
-from groq import Groq
+from openai import OpenAI
 
 # === КОНФИГУРАЦИЯ ===
 ADMIN_USER_IDS = [int(x.strip()) for x in os.getenv("ADMIN_USER_ID", "").split(",") if x.strip()]
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 # Разрешённые пользователи для агрессивных ответов
 ALLOWED_USER_IDS = {1051036811, 5721645471, 5117497565}
@@ -130,7 +130,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
 
-    # Убрать мут
     if data.startswith("unmute:"):
         try:
             _, chat_id_str, user_id_str = data.split(":")
@@ -417,13 +416,11 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         except:
             pass
 
-        # Мут истёк — удаляем
         if time.time() >= muted[key]:
             del muted[key]
             save_muted_users(muted)
         return
 
-    # Обычная агрессия для ALLOWED_USER_IDS
     if user.id in ALLOWED_USER_IDS:
         text = (msg.text or msg.caption or "").strip()
         if text:
@@ -437,7 +434,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 except:
                     pass
 
-# --- ГЕНЕРАЦИЯ АГРЕССИВНОГО ОТВЕТА ---
+# --- ГЕНЕРАЦИЯ АГРЕССИВНОГО ОТВЕТА ЧЕРЕЗ OPENROUTER ---
 async def generate_aggressive_reply(text: str) -> str | None:
     prompt = (
         f"Пользователь написал: {text}\n"
@@ -450,7 +447,7 @@ async def generate_aggressive_reply(text: str) -> str | None:
         "Ответ:"
     )
 
-    if not GROQ_API_KEY:
+    if not OPENROUTER_API_KEY:
         return random.choice([
             "Докажи или ты шкура🤣",
             "Не доказал! Значит 🫵петушок!",
@@ -459,16 +456,20 @@ async def generate_aggressive_reply(text: str) -> str | None:
         ])
 
     try:
-        client = Groq(api_key=GROQ_API_KEY)
+        client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=OPENROUTER_API_KEY
+        )
+
         loop = asyncio.get_event_loop()
         chat_completion = await loop.run_in_executor(
             None,
             lambda: client.chat.completions.create(
+                model="meta-llama/llama-3.1-8b-instruct:free",
                 messages=[{"role": "user", "content": prompt}],
-                model="llama-3.1-8b-instant",
                 temperature=1.4,
                 max_tokens=30,
-                top_p=0.93,
+                top_p=0.93
             )
         )
         reply = chat_completion.choices[0].message.content.strip()
@@ -482,16 +483,20 @@ async def generate_aggressive_reply(text: str) -> str | None:
 
         lower = reply.lower()
         if not any(w in lower for w in ["шкура", "петушок", "пидор", "чмо", "гей", "наемник", "женя"]):
-            return None
+            return random.choice([
+                "Докажи или ты шкура🤣",
+                "Не доказал! Значит 🫵петушок!",
+            ])
 
         return reply
 
     except Exception as e:
-        logger.error(f"Groq error: {e}")
+        logger.error(f"OpenRouter error: {e}")
         return random.choice([
             "Докажи или ты шкура🤣",
             "Не доказал! Значит 🫵петушок!",
-            "Наемник твоя девушка"
+            "Наемник твоя девушка",
+            "Женя заставил Наемника в муте сидеть! 🤣"
         ])
 
 # === ЗАПУСК (WEBHOOK) ===
@@ -516,11 +521,11 @@ def main():
         group=0
     )
 
-    RENDER_URL = os.getenv("RENDER_EXTERNAL_URL")
-    if not RENDER_URL:
+    RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
+    if not RENDER_EXTERNAL_URL:
         raise RuntimeError("❌ RENDER_EXTERNAL_URL не задан!")
 
-    webhook_url = f"{RENDER_URL.rstrip('/')}/{BOT_TOKEN}"
+    webhook_url = f"{RENDER_EXTERNAL_URL.rstrip('/')}/{BOT_TOKEN}"
 
     app.run_webhook(
         listen="0.0.0.0",
