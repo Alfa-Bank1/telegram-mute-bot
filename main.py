@@ -451,7 +451,6 @@ async def generate_aggressive_reply(text: str) -> str | None:
     )
 
     if not GROQ_API_KEY:
-        # Если нет ключа — используем заглушку
         return random.choice([
             "Докажи или ты шкура🤣",
             "Не доказал! Значит 🫵петушок!",
@@ -489,15 +488,14 @@ async def generate_aggressive_reply(text: str) -> str | None:
 
     except Exception as e:
         logger.error(f"Groq error: {e}")
-        # Возвращаем заглушку при ошибке
         return random.choice([
             "Докажи или ты шкура🤣",
             "Не доказал! Значит 🫵петушок!",
             "Наемник твоя девушка"
         ])
 
-# --- ЗАПУСК (WEBHOOK) ---
-async def main():
+# === ЗАПУСК (WEBHOOK) ===
+def main():
     if not BOT_TOKEN:
         raise RuntimeError("❌ BOT_TOKEN не задан в переменных окружения!")
 
@@ -524,16 +522,12 @@ async def main():
 
     webhook_url = f"{RENDER_URL.rstrip('/')}/{BOT_TOKEN}"
 
-    # Устанавливаем webhook
-    await app.bot.set_webhook(url=webhook_url)
-
-    # Запускаем сервер
-    await app.run_webhook(
+    app.run_webhook(
         listen="0.0.0.0",
-        port=int(os.environ.get("PORT", 8000)),
+        port=int(os.environ.get("PORT", 10000)),
         url_path=BOT_TOKEN,
         webhook_url=webhook_url
     )
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
