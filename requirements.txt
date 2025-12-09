@@ -1,0 +1,4 @@
+python-telegram-bot==20.7
+groq==0.9.0
+flask
+telegram
