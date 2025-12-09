@@ -1,13 +1,10 @@
-# main.py
 import os
 import logging
-import asyncio
 import json
-import threading
 import re
 import time
 import random
-from flask import Flask
+import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -27,11 +24,9 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 # Разрешённые пользователи для агрессивных ответов
 ALLOWED_USER_IDS = {1051036811, 5721645471, 5117497565}
 
-# Файлы данных
+# Файлы данных (в /tmp — Render позволяет писать туда)
 USERS_FILE = "/tmp/users_cache.json"
 MUTED_FILE = "/tmp/invisible_mutes.json"
-USERS_FILE_ALT = "users_cache.json"
-MUTED_FILE_ALT = "invisible_mutes.json"
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -50,8 +45,11 @@ def load_data(filename, default):
     return default
 
 def save_data(filename, data):
-    with open(filename, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    try:
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Ошибка сохранения {filename}: {e}")
 
 def load_users():
     return load_data(USERS_FILE, {})
@@ -61,7 +59,11 @@ def save_users(data):
 
 def load_muted_users():
     raw = load_data(MUTED_FILE, {})
-    return {(int(k.split(':')[0]), int(k.split(':')[1])): v for k, v in raw.items()}
+    try:
+        return {(int(k.split(':')[0]), int(k.split(':')[1])): v for k, v in raw.items()}
+    except Exception as e:
+        logger.error(f"Ошибка парсинга muted_users: {e}")
+        return {}
 
 def save_muted_users(muted_dict):
     serializable = {f"{chat}:{user}": expiry for (chat, user), expiry in muted_dict.items()}
@@ -71,12 +73,7 @@ def save_muted_users(muted_dict):
 async def debug_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_USER_IDS:
         return
-    files_to_remove = [
-        USERS_FILE,
-        MUTED_FILE,
-        USERS_FILE_ALT,
-        MUTED_FILE_ALT
-    ]
+    files_to_remove = [USERS_FILE, MUTED_FILE]
     removed = []
     for f in files_to_remove:
         if os.path.exists(f):
@@ -85,10 +82,7 @@ async def debug_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 removed.append(f)
             except Exception as e:
                 logger.error(f"Не удалось удалить {f}: {e}")
-    if removed:
-        msg = "🧹 Удалены файлы:\n" + "\n".join(removed)
-    else:
-        msg = "✅ Нет файлов для удаления."
+    msg = "🧹 Удалены файлы кэша." if removed else "✅ Нет файлов для удаления."
     await update.message.reply_text(msg)
 
 # --- ПОЛУЧЕНИЕ СПИСКА ГРУПП ---
@@ -138,9 +132,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Убрать мут
     if data.startswith("unmute:"):
-        if update.effective_user.id not in ADMIN_USER_IDS:
-            await query.answer("⛔ Только админ может убирать мут.", show_alert=True)
-            return
         try:
             _, chat_id_str, user_id_str = data.split(":")
             chat_id = int(chat_id_str)
@@ -286,11 +277,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await asyncio.sleep(seconds)
             current = load_muted_users()
             key = (chat_id, user_id)
-            if key in current:
-                if time.time() >= current[key] - 2:
-                    del current[key]
-                    save_muted_users(current)
-                    logger.info(f"Авто-размут: {user_id} в {chat_id}")
+            if key in current and time.time() >= current[key] - 2:
+                del current[key]
+                save_muted_users(current)
+                logger.info(f"Авто-размут: {user_id} в {chat_id}")
 
         asyncio.create_task(auto_unmute())
         if seconds == 31536000:
@@ -347,11 +337,8 @@ async def admin_private_message(update: Update, context: ContextTypes.DEFAULT_TY
         err = str(e)
         if "migrated" in err and "new chat id" in err:
             new_id_match = re.search(r"New chat id: (-\d+)", err)
-            if new_id_match:
-                new_id = new_id_match.group(1)
-                text = f"❌ Группа мигрировала. Новый ID: {new_id}. Обновите выбор группы."
-            else:
-                text = "❌ Группа мигрировала в супергруппу. Перезапустите выбор группы."
+            new_id = new_id_match.group(1) if new_id_match else "неизвестен"
+            text = f"❌ Группа мигрировала. Новый ID: {new_id}. Обновите выбор группы."
         elif "bot is not a member" in err or "chat not found" in err:
             text = "❌ Бот не состоит в группе или группа недоступна."
         elif "can't send messages" in err:
@@ -395,32 +382,23 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
     muted = load_muted_users()
     key = (chat.id, user.id)
-    is_muted = False
-    if key in muted:
-        expiry = muted[key]
-        if time.time() < expiry:
-            is_muted = True
-        else:
-            del muted[key]
-            save_muted_users(muted)
-            logger.info(f"Мут истёк: {user.id} в {chat.id}")
+    is_muted = key in muted and time.time() < muted[key]
 
     if is_muted:
         try:
             await msg.delete()
-            logger.info(f"Сообщение от {user.id} удалено (мут активен)")
-        except Exception as e:
-            logger.warning(f"Не удалось удалить сообщение: {e}")
+        except:
+            pass
 
         if user.id in ALLOWED_USER_IDS:
-            special_replies = [
+            replies = [
                 "Наемник подружка Жени! 🫵Геи",
                 "😂Женя заставил Наемника смазку покупать",
                 "Вы там уже венчались с Женей, Наемник? 🤣",
                 "Наемник, твоя жена Женя зовёт! 🫵",
                 "Сколько Женя за смазку заплатил, Наемник? 🤣"
             ]
-            reply_text = random.choice(special_replies)
+            reply_text = random.choice(replies)
         else:
             name = (user.first_name or user.username or f"ID{user.id}")
             fake_text = f"{name} пишет в муте"
@@ -436,32 +414,28 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
         try:
             await context.bot.send_message(chat_id=chat.id, text=reply_text)
-            logger.info(f"Отправлен ответ мутному {user.id} (без кнопки)")
-        except Exception as e:
-            logger.error(f"Ошибка отправки ответа мутному: {e}")
+        except:
+            pass
 
+        # Мут истёк — удаляем
+        if time.time() >= muted[key]:
+            del muted[key]
+            save_muted_users(muted)
         return
 
-    if user.id not in ALLOWED_USER_IDS:
-        return
-
-    text = (msg.text or msg.caption or "").strip()
-    if not text:
-        return
-
-    word_count = len(re.findall(r'\S+', text))
-    delay = 5 if word_count <= 10 else 10
-
-    reply_text = await generate_aggressive_reply(text)
-    if not reply_text:
-        return
-
-    await asyncio.sleep(delay)
-
-    try:
-        await context.bot.send_message(chat_id=chat.id, text=reply_text)
-    except:
-        pass
+    # Обычная агрессия для ALLOWED_USER_IDS
+    if user.id in ALLOWED_USER_IDS:
+        text = (msg.text or msg.caption or "").strip()
+        if text:
+            word_count = len(re.findall(r'\S+', text))
+            delay = 5 if word_count <= 10 else 10
+            reply_text = await generate_aggressive_reply(text)
+            if reply_text:
+                await asyncio.sleep(delay)
+                try:
+                    await context.bot.send_message(chat_id=chat.id, text=reply_text)
+                except:
+                    pass
 
 # --- ГЕНЕРАЦИЯ АГРЕССИВНОГО ОТВЕТА ---
 async def generate_aggressive_reply(text: str) -> str | None:
@@ -475,6 +449,15 @@ async def generate_aggressive_reply(text: str) -> str | None:
         "Не пиши вежливо. Не объясняй. Просто брось фразу.\n"
         "Ответ:"
     )
+
+    if not GROQ_API_KEY:
+        # Если нет ключа — используем заглушку
+        return random.choice([
+            "Докажи или ты шкура🤣",
+            "Не доказал! Значит 🫵петушок!",
+            "Наемник твоя девушка",
+            "Женя смазку заставил Наемник купить! геи🫵"
+        ])
 
     try:
         client = Groq(api_key=GROQ_API_KEY)
@@ -499,39 +482,58 @@ async def generate_aggressive_reply(text: str) -> str | None:
         reply = re.sub(r'\s+([.,!?])', r'\1', reply)
 
         lower = reply.lower()
-        if not any(word in lower for word in ["шкура", "петушок", "пидор", "чмо", "гей", "наемник", "женя"]):
+        if not any(w in lower for w in ["шкура", "петушок", "пидор", "чмо", "гей", "наемник", "женя"]):
             return None
 
-        return reply if reply else None
+        return reply
 
     except Exception as e:
-        logger.error(f"Ошибка Groq: {e}")
-        return None
+        logger.error(f"Groq error: {e}")
+        # Возвращаем заглушку при ошибке
+        return random.choice([
+            "Докажи или ты шкура🤣",
+            "Не доказал! Значит 🫵петушок!",
+            "Наемник твоя девушка"
+        ])
 
-# --- ВЕБ-СЕРВЕР ---
-app = Flask(__name__)
+# --- ЗАПУСК (WEBHOOK) ---
+async def main():
+    if not BOT_TOKEN:
+        raise RuntimeError("❌ BOT_TOKEN не задан в переменных окружения!")
 
-@app.route('/')
-def home():
-    return "Бот активен."
+    app = Application.builder().token(BOT_TOKEN).build()
 
-def run_flask():
-    app.run(host='0.0.0.0', port=8080)
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("clear", debug_clear))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.PRIVATE & filters.User(user_id=ADMIN_USER_IDS),
+            admin_private_message
+        ),
+        group=1
+    )
+    app.add_handler(
+        MessageHandler(filters.ALL & ~filters.COMMAND, handle_group_message),
+        group=0
+    )
 
-# --- ЗАПУСК ---
-def run_bot_in_loop():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    app_bot = Application.builder().token(BOT_TOKEN).build()
-    app_bot.add_handler(CommandHandler("start", start))
-    app_bot.add_handler(CommandHandler("clear", debug_clear))
-    app_bot.add_handler(CallbackQueryHandler(button_handler))
-    app_bot.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.User(user_id=ADMIN_USER_IDS), admin_private_message), group=1)
-    app_bot.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_group_message), group=0)
-    logger.info("✅ Бот запущен.")
-    loop.run_until_complete(app_bot.run_polling())
+    RENDER_URL = os.getenv("RENDER_EXTERNAL_URL")
+    if not RENDER_URL:
+        raise RuntimeError("❌ RENDER_EXTERNAL_URL не задан!")
+
+    webhook_url = f"{RENDER_URL.rstrip('/')}/{BOT_TOKEN}"
+
+    # Устанавливаем webhook
+    await app.bot.set_webhook(url=webhook_url)
+
+    # Запускаем сервер
+    await app.run_webhook(
+        listen="0.0.0.0",
+        port=int(os.environ.get("PORT", 8000)),
+        url_path=BOT_TOKEN,
+        webhook_url=webhook_url
+    )
 
 if __name__ == "__main__":
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    run_bot_in_loop()
+    asyncio.run(main())
