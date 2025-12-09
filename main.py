@@ -14,12 +14,12 @@ from telegram.ext import (
     CallbackQueryHandler,
     filters
 )
-from openai import OpenAI
+from groq import Groq
 
 # === КОНФИГУРАЦИЯ ===
 ADMIN_USER_IDS = [int(x.strip()) for x in os.getenv("ADMIN_USER_ID", "").split(",") if x.strip()]
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # Разрешённые пользователи для агрессивных ответов
 ALLOWED_USER_IDS = {1051036811, 5721645471, 5117497565}
@@ -434,7 +434,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 except:
                     pass
 
-# --- ГЕНЕРАЦИЯ АГРЕССИВНОГО ОТВЕТА ЧЕРЕЗ OPENROUTER ---
+# --- ГЕНЕРАЦИЯ АГРЕССИВНОГО ОТВЕТА ЧЕРЕЗ GROQ ---
 async def generate_aggressive_reply(text: str) -> str | None:
     prompt = (
         f"Пользователь написал: {text}\n"
@@ -447,7 +447,7 @@ async def generate_aggressive_reply(text: str) -> str | None:
         "Ответ:"
     )
 
-    if not OPENROUTER_API_KEY:
+    if not GROQ_API_KEY:
         return random.choice([
             "Докажи или ты шкура🤣",
             "Не доказал! Значит 🫵петушок!",
@@ -456,17 +456,15 @@ async def generate_aggressive_reply(text: str) -> str | None:
         ])
 
     try:
-        client = OpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=OPENROUTER_API_KEY
-        )
+        # ✅ Правильная инициализация — без proxies, без ошибок
+        client = Groq(api_key=GROQ_API_KEY)
 
         loop = asyncio.get_event_loop()
         chat_completion = await loop.run_in_executor(
             None,
             lambda: client.chat.completions.create(
-                model="meta-llama/llama-3.1-8b-instruct:free",
                 messages=[{"role": "user", "content": prompt}],
+                model="llama-3.1-8b-instant",
                 temperature=1.4,
                 max_tokens=30,
                 top_p=0.93
@@ -477,10 +475,12 @@ async def generate_aggressive_reply(text: str) -> str | None:
         if not reply:
             return None
 
+        # Очистка от запрещённых символов
         reply = re.sub(r'[^\w\sа-яА-ЯёЁ.,!?🤣🫵]', ' ', reply)
         reply = re.sub(r'\s+', ' ', reply).strip()
         reply = re.sub(r'\s+([.,!?])', r'\1', reply)
 
+        # Проверка на наличие ключевых слов
         lower = reply.lower()
         if not any(w in lower for w in ["шкура", "петушок", "пидор", "чмо", "гей", "наемник", "женя"]):
             return random.choice([
@@ -491,7 +491,7 @@ async def generate_aggressive_reply(text: str) -> str | None:
         return reply
 
     except Exception as e:
-        logger.error(f"OpenRouter error: {e}")
+        logger.error(f"Groq error: {e}")
         return random.choice([
             "Докажи или ты шкура🤣",
             "Не доказал! Значит 🫵петушок!",
@@ -527,6 +527,7 @@ def main():
 
     webhook_url = f"{RENDER_EXTERNAL_URL.rstrip('/')}/{BOT_TOKEN}"
 
+    # ✅ Render требует порт из переменной окружения PORT (по умолчанию 10000)
     app.run_webhook(
         listen="0.0.0.0",
         port=int(os.environ.get("PORT", 10000)),
