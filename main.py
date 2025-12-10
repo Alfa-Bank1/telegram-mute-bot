@@ -21,6 +21,15 @@ ADMIN_USER_IDS = [int(x.strip()) for x in os.getenv("ADMIN_USER_ID", "").split("
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
+# Запрещённые темы (семья, религия, национальность)
+FORBIDDEN_TOPICS = [
+    "мам", "пап", "родител", "семь", "жена", "муж", "ребён", "ребен", "сын", "дочь",
+    "бог", "аллах", "исус", "христ", "религ", "мечеть", "церков", "молитв", "вера", "атеизм",
+    "наци", "рас", "этнос", "рус", "украин", "белорус", "казан", "татар", "евре", "немец",
+    "американ", "китаец", "япон", "черн", "бел", "мусульман", "христиан", "будд", "инду",
+    "родин", "патриот", "граждан", "россия", "украина", "сша", "кита", "германи", "франци"
+]
+
 # Разрешённые пользователи для агрессивных ответов
 ALLOWED_USER_IDS = {1051036811, 5721645471, 5117497565}
 
@@ -68,6 +77,11 @@ def load_muted_users():
 def save_muted_users(muted_dict):
     serializable = {f"{chat}:{user}": expiry for (chat, user), expiry in muted_dict.items()}
     save_data(MUTED_FILE, serializable)
+
+# --- ПРОВЕРКА НА ЗАПРЕЩЁННЫЕ ТЕМЫ ---
+def contains_forbidden_topic(text: str) -> bool:
+    text_low = text.lower()
+    return any(word in text_low for word in FORBIDDEN_TOPICS)
 
 # --- ОТЛАДКА: /clear ---
 async def debug_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -348,6 +362,28 @@ async def admin_private_message(update: Update, context: ContextTypes.DEFAULT_TY
             text = f"❌ Ошибка: {err[:100]}"
         await update.message.reply_text(text)
 
+# --- ПОДГОТОВКА ОТВЕТА БЕЗ ЗАПРЕЩЁННЫХ ТЕМ ---
+async def safe_generate_aggressive_reply(text: str) -> str | None:
+    """Генерирует ответ, но отклоняет любые упоминания семьи/религии/национальности."""
+    while True:
+        reply = await generate_aggressive_reply(text)
+        if reply is None:
+            return None
+        if not contains_forbidden_topic(reply):
+            return reply
+        # Если содержит — пробуем ещё раз (максимум 3 попытки)
+        for _ in range(2):
+            reply = await generate_aggressive_reply(text)
+            if reply and not contains_forbidden_topic(reply):
+                return reply
+        # Если не получилось — возвращаем безопасную фразу
+        return random.choice([
+            "Докажи или ты шкура🤣",
+            "Не доказал! Значит 🫵петушок!",
+            "Наемник твоя девушка",
+            "Женя заставил Наемника в муте сидеть! 🤣"
+        ])
+
 # --- ОБРАБОТЧИК ГРУПП ---
 async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -389,50 +425,62 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         except:
             pass
 
-        if user.id in ALLOWED_USER_IDS:
-            replies = [
-                "Наемник подружка Жени! 🫵Геи",
-                "😂Женя заставил Наемника смазку покупать",
-                "Вы там уже венчались с Женей, Наемник? 🤣",
-                "Наемник, твоя жена Женя зовёт! 🫵",
-                "Сколько Женя за смазку заплатил, Наемник? 🤣"
-            ]
-            reply_text = random.choice(replies)
-        else:
-            name = (user.first_name or user.username or f"ID{user.id}")
-            fake_text = f"{name} пишет в муте"
-            reply_text = await generate_aggressive_reply(fake_text)
-            if not reply_text:
-                reply_text = random.choice([
-                    "Шкура, сиди в муте! 🫵",
-                    "Петушок, мут не кончился! 🤣",
-                    "Чмо, сиди тихо! 🤫",
-                    "Гей, ты в муте! Не пизди! 🫵",
-                    "Не доказал! Значит 🫵петушок!",
-                ])
+        # === Пользователь в муте: ответ через 30 сек, БЕЗ отметки ===
+        async def delayed_reply_muted():
+            await asyncio.sleep(30)
+            if user.id in ALLOWED_USER_IDS:
+                replies = [
+                    "Наемник подружка Жени! 🫵Геи",
+                    "😂Женя заставил Наемника смазку покупать",
+                    "Вы там уже венчались с Женей, Наемник? 🤣",
+                    "Наемник, твоя жена Женя зовёт! 🫵",
+                    "Сколько Женя за смазку заплатил, Наемник? 🤣"
+                ]
+                reply_text = random.choice(replies)
+            else:
+                name = (user.first_name or user.username or f"ID{user.id}")
+                fake_text = f"{name} пишет в муте"
+                reply_text = await safe_generate_aggressive_reply(fake_text)
+                if not reply_text:
+                    reply_text = random.choice([
+                        "Шкура, сиди в муте! 🫵",
+                        "Петушок, мут не кончился! 🤣",
+                        "Чмо, сиди тихо! 🤫",
+                        "Гей, ты в муте! Не пизди! 🫵",
+                        "Не доказал! Значит 🫵петушок!",
+                    ])
 
-        try:
-            await context.bot.send_message(chat_id=chat.id, text=reply_text)
-        except:
-            pass
+            try:
+                await context.bot.send_message(chat_id=chat.id, text=reply_text)
+            except:
+                pass
 
-        if time.time() >= muted[key]:
-            del muted[key]
-            save_muted_users(muted)
+            if time.time() >= muted[key]:
+                del muted[key]
+                save_muted_users(muted)
+
+        asyncio.create_task(delayed_reply_muted())
         return
 
+    # === Обычный пользователь: ответ через 30 сек + отметка ===
     if user.id in ALLOWED_USER_IDS:
         text = (msg.text or msg.caption or "").strip()
-        if text:
-            word_count = len(re.findall(r'\S+', text))
-            delay = 5 if word_count <= 10 else 10
-            reply_text = await generate_aggressive_reply(text)
-            if reply_text:
-                await asyncio.sleep(delay)
-                try:
-                    await context.bot.send_message(chat_id=chat.id, text=reply_text)
-                except:
-                    pass
+        if text and not contains_forbidden_topic(text):
+            async def delayed_reply_normal():
+                await asyncio.sleep(30)
+                reply_text = await safe_generate_aggressive_reply(text)
+                if reply_text:
+                    # Отмечаем пользователя (reply_to_message_id)
+                    try:
+                        await context.bot.send_message(
+                            chat_id=chat.id,
+                            text=reply_text,
+                            reply_to_message_id=msg.message_id
+                        )
+                    except:
+                        pass
+
+            asyncio.create_task(delayed_reply_normal())
 
 # --- ГЕНЕРАЦИЯ АГРЕССИВНОГО ОТВЕТА ЧЕРЕЗ GROQ ---
 async def generate_aggressive_reply(text: str) -> str | None:
@@ -456,7 +504,6 @@ async def generate_aggressive_reply(text: str) -> str | None:
         ])
 
     try:
-        # ✅ Правильная инициализация — без proxies, без ошибок
         client = Groq(api_key=GROQ_API_KEY)
 
         loop = asyncio.get_event_loop()
@@ -475,18 +522,13 @@ async def generate_aggressive_reply(text: str) -> str | None:
         if not reply:
             return None
 
-        # Очистка от запрещённых символов
         reply = re.sub(r'[^\w\sа-яА-ЯёЁ.,!?🤣🫵]', ' ', reply)
         reply = re.sub(r'\s+', ' ', reply).strip()
         reply = re.sub(r'\s+([.,!?])', r'\1', reply)
 
-        # Проверка на наличие ключевых слов
         lower = reply.lower()
         if not any(w in lower for w in ["шкура", "петушок", "пидор", "чмо", "гей", "наемник", "женя"]):
-            return random.choice([
-                "Докажи или ты шкура🤣",
-                "Не доказал! Значит 🫵петушок!",
-            ])
+            return None
 
         return reply
 
@@ -495,8 +537,7 @@ async def generate_aggressive_reply(text: str) -> str | None:
         return random.choice([
             "Докажи или ты шкура🤣",
             "Не доказал! Значит 🫵петушок!",
-            "Наемник твоя девушка",
-            "Женя заставил Наемника в муте сидеть! 🤣"
+            "Наемник твоя девушка"
         ])
 
 # === ЗАПУСК (WEBHOOK) ===
@@ -527,7 +568,6 @@ def main():
 
     webhook_url = f"{RENDER_EXTERNAL_URL.rstrip('/')}/{BOT_TOKEN}"
 
-    # ✅ Render требует порт из переменной окружения PORT (по умолчанию 10000)
     app.run_webhook(
         listen="0.0.0.0",
         port=int(os.environ.get("PORT", 10000)),
