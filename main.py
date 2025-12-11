@@ -37,6 +37,9 @@ ALLOWED_USER_IDS = {1051036811, 5721645471, 5117497565}
 USERS_FILE = "/tmp/users_cache.json"
 MUTED_FILE = "/tmp/invisible_mutes.json"
 
+# Хранилище активных отложенных задач (по чату и пользователю)
+pending_replies = {}  # {(chat_id, user_id): {"task": task, "message_id": id}}
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
@@ -362,21 +365,18 @@ async def admin_private_message(update: Update, context: ContextTypes.DEFAULT_TY
             text = f"❌ Ошибка: {err[:100]}"
         await update.message.reply_text(text)
 
-# --- ПОДГОТОВКА ОТВЕТА БЕЗ ЗАПРЕЩЁННЫХ ТЕМ ---
+# --- ФУНКЦИЯ БЕЗОПАСНОЙ ГЕНЕРАЦИИ ---
 async def safe_generate_aggressive_reply(text: str) -> str | None:
-    """Генерирует ответ, но отклоняет любые упоминания семьи/религии/национальности."""
     while True:
         reply = await generate_aggressive_reply(text)
         if reply is None:
             return None
         if not contains_forbidden_topic(reply):
             return reply
-        # Если содержит — пробуем ещё раз (максимум 3 попытки)
         for _ in range(2):
             reply = await generate_aggressive_reply(text)
             if reply and not contains_forbidden_topic(reply):
                 return reply
-        # Если не получилось — возвращаем безопасную фразу
         return random.choice([
             "Докажи или ты шкура🤣",
             "Не доказал! Значит 🫵петушок!",
@@ -459,28 +459,44 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 del muted[key]
                 save_muted_users(muted)
 
-        asyncio.create_task(delayed_reply_muted())
+        # Отмена предыдущей задачи (если есть)
+        task_key = (chat.id, user.id)
+        if task_key in pending_replies:
+            pending_replies[task_key]["task"].cancel()
+        pending_replies[task_key] = {"task": asyncio.create_task(delayed_reply_muted()), "message_id": msg.message_id}
         return
 
-    # === Обычный пользователь: ответ через 30 сек + отметка ===
+    # === Обычный пользователь ИЗ СПИСКА ALLOWED_USER_IDS ===
     if user.id in ALLOWED_USER_IDS:
         text = (msg.text or msg.caption or "").strip()
-        if text and not contains_forbidden_topic(text):
-            async def delayed_reply_normal():
-                await asyncio.sleep(30)
-                reply_text = await safe_generate_aggressive_reply(text)
-                if reply_text:
-                    # Отмечаем пользователя (reply_to_message_id)
-                    try:
-                        await context.bot.send_message(
-                            chat_id=chat.id,
-                            text=reply_text,
-                            reply_to_message_id=msg.message_id
-                        )
-                    except:
-                        pass
+        if not text or contains_forbidden_topic(text):
+            return
 
-            asyncio.create_task(delayed_reply_normal())
+        # Отмена предыдущей задачи (если есть)
+        task_key = (chat.id, user.id)
+        if task_key in pending_replies:
+            pending_replies[task_key]["task"].cancel()
+
+        async def delayed_reply_normal():
+            await asyncio.sleep(30)
+            # Убедимся, что задача не была отменена
+            if task_key in pending_replies and pending_replies[task_key]["task"].done():
+                return
+            reply_text = await safe_generate_aggressive_reply(text)
+            if reply_text:
+                target_msg_id = pending_replies.get(task_key, {}).get("message_id", msg.message_id)
+                try:
+                    await context.bot.send_message(
+                        chat_id=chat.id,
+                        text=reply_text,
+                        reply_to_message_id=target_msg_id
+                    )
+                except:
+                    pass
+            pending_replies.pop(task_key, None)
+
+        new_task = asyncio.create_task(delayed_reply_normal())
+        pending_replies[task_key] = {"task": new_task, "message_id": msg.message_id}
 
 # --- ГЕНЕРАЦИЯ АГРЕССИВНОГО ОТВЕТА ЧЕРЕЗ GROQ ---
 async def generate_aggressive_reply(text: str) -> str | None:
