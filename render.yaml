@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: telegram-mute-bot
+    env: python
+    region: oregan
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.3
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_USER_ID
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: RENDER_EXTERNAL_URL
+        value: https://telegram-mute-bot.onrender.com
+    disk:
+      name: bot-data
+      mountPath: /data
+      sizeGB: 1
