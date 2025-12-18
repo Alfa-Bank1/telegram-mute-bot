@@ -37,9 +37,6 @@ ALLOWED_USER_IDS = {1366160364, 1705831143, 7332396209}
 USERS_FILE = "/tmp/users_cache.json"
 MUTED_FILE = "/tmp/invisible_mutes.json"
 
-# Хранилище активных отложенных задач (по чату и пользователю)
-pending_replies = {}  # {(chat_id, user_id): {"task": task, "message_id": id}}
-
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
@@ -367,22 +364,22 @@ async def admin_private_message(update: Update, context: ContextTypes.DEFAULT_TY
 
 # --- ФУНКЦИЯ БЕЗОПАСНОЙ ГЕНЕРАЦИИ ---
 async def safe_generate_aggressive_reply(text: str) -> str | None:
-    while True:
+    reply = await generate_aggressive_reply(text)
+    if reply is not None and not contains_forbidden_topic(reply):
+        return reply
+
+    # Повторная попытка
+    for _ in range(2):
         reply = await generate_aggressive_reply(text)
-        if reply is None:
-            return None
-        if not contains_forbidden_topic(reply):
+        if reply is not None and not contains_forbidden_topic(reply):
             return reply
-        for _ in range(2):
-            reply = await generate_aggressive_reply(text)
-            if reply and not contains_forbidden_topic(reply):
-                return reply
-        return random.choice([
-            "Я твой рот шатал чепух🤣",
-            "Продолжаешь базарить, значит 🫵петушок!",
-            "Бл ты🫵 такой попуск🤣",
-            "Это воздух ОЧКОШНИКА"
-        ])
+
+    return random.choice([
+        "Я твой рот шатал чепух🤣",
+        "Продолжаешь базарить, значит 🫵петушок!",
+        "Бл ты🫵 такой попуск🤣",
+        "Это воздух ОЧКОШНИКА"
+    ])
 
 # --- ОБРАБОТЧИК ГРУПП ---
 async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -419,104 +416,79 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     key = (chat.id, user.id)
     is_muted = key in muted and time.time() < muted[key]
 
+    text = (msg.text or msg.caption or "").strip()
+    if not text or contains_forbidden_topic(text):
+        return
+
     if is_muted:
         try:
             await msg.delete()
         except:
             pass
 
-        # === Пользователь в муте: ответ через 10 сек, БЕЗ отметки ===
-        async def delayed_reply_muted():
-            await asyncio.sleep(10)
-            if user.id in ALLOWED_USER_IDS:
-                replies = [
-                    "🫵Геи",
-                    "Жопу закрой щенк😂",
-                    "Кто эту шерсть сюда пустил?",
-                    "Часотка🫵",
-                    "Поддерживаешь геев, значит пидр🫵"
-                ]
-                reply_text = random.choice(replies)
-            else:
-                name = (user.first_name or user.username or f"ID{user.id}")
-                fake_text = f"{name} пишет в муте"
-                reply_text = await safe_generate_aggressive_reply(fake_text)
-                if not reply_text:
-                    reply_text = random.choice([
-                        "Шкура, сиди в муте! 🫵",
-                        "Петушок, мут не кончился! 🤣",
-                        "Чмо, сиди тихо! 🤫",
-                        "Гей, ты в муте! Не пизди! 🫵",
-                        "Не доказал! Значит 🫵петушок!",
-                    ])
+        # Ответ сразу, без задержки, БЕЗ отметки
+        if user.id in ALLOWED_USER_IDS:
+            reply_text = random.choice([
+                "Наемник подружка Жени! 🫵Геи",
+                "😂Женя заставил Наемника смазку покупать",
+                "Ты в муте, петушок! 🫵",
+                "Сиди тихо, шкура! 🤫"
+            ])
+        else:
+            fake_text = f"{user.first_name or 'Аноним'} пишет в муте"
+            reply_text = await safe_generate_aggressive_reply(fake_text)
+            if not reply_text:
+                reply_text = random.choice([
+                    "Шкура, сиди в муте! 🫵",
+                    "Петушок, мут не кончился! 🤣",
+                    "Чмо, сиди тихо! 🤫",
+                    "Гей, ты в муте! Не пизди! 🫵",
+                    "Не доказал! Значит 🫵петушок!",
+                ])
 
-            try:
-                await context.bot.send_message(chat_id=chat.id, text=reply_text)
-            except:
-                pass
+        try:
+            await context.bot.send_message(chat_id=chat.id, text=reply_text)
+        except:
+            pass
 
-            if time.time() >= muted[key]:
-                del muted[key]
-                save_muted_users(muted)
+        # Автоматический размут при истечении срока
+        if time.time() >= muted[key]:
+            del muted[key]
+            save_muted_users(muted)
 
-        # Отмена предыдущей задачи (если есть)
-        task_key = (chat.id, user.id)
-        if task_key in pending_replies:
-            pending_replies[task_key]["task"].cancel()
-        pending_replies[task_key] = {"task": asyncio.create_task(delayed_reply_muted()), "message_id": msg.message_id}
         return
 
-    # === Обычный пользователь ИЗ СПИСКА ALLOWED_USER_IDS ===
+    # Обычный пользователь из разрешённого списка — ответ сразу С отметкой
     if user.id in ALLOWED_USER_IDS:
-        text = (msg.text or msg.caption or "").strip()
-        if not text or contains_forbidden_topic(text):
-            return
-
-        # Отмена предыдущей задачи (если есть)
-        task_key = (chat.id, user.id)
-        if task_key in pending_replies:
-            pending_replies[task_key]["task"].cancel()
-
-        async def delayed_reply_normal():
-            await asyncio.sleep(10)
-            # Убедимся, что задача не была отменена
-            if task_key in pending_replies and pending_replies[task_key]["task"].done():
-                return
-            reply_text = await safe_generate_aggressive_reply(text)
-            if reply_text:
-                target_msg_id = pending_replies.get(task_key, {}).get("message_id", msg.message_id)
-                try:
-                    await context.bot.send_message(
-                        chat_id=chat.id,
-                        text=reply_text,
-                        reply_to_message_id=target_msg_id
-                    )
-                except:
-                    pass
-            pending_replies.pop(task_key, None)
-
-        new_task = asyncio.create_task(delayed_reply_normal())
-        pending_replies[task_key] = {"task": new_task, "message_id": msg.message_id}
+        reply_text = await safe_generate_aggressive_reply(text)
+        if reply_text:
+            try:
+                await context.bot.send_message(
+                    chat_id=chat.id,
+                    text=reply_text,
+                    reply_to_message_id=msg.message_id
+                )
+            except:
+                pass
 
 # --- ГЕНЕРАЦИЯ АГРЕССИВНОГО ОТВЕТА ЧЕРЕЗ GROQ ---
 async def generate_aggressive_reply(text: str) -> str | None:
     prompt = (
         f"Пользователь написал: {text}\n"
-        "Ты — агрессивный, грубый, провокационный тролль. Ответь максимально агрессивно, грубо и подробно. "
-        "Используй нецензурную лексику, оскорбления, эмодзи (например 🤣, 🫵). "
-        "Называй пользователя петушком, шкурой, пидором, шерстью, геем, Часоткой и т.п. "
-        "Обязательно докапывайся, утверждай, что он очкошник, и требуй доказательств. "
-        "Не ограничивайся одной фразой — пиши полный, связный, но агрессивный текст без цензуры. "
+        "Ты — агрессивный тролль в чате. Ответь ОДНОЙ завершённой короткой фразой (не обрывай слово!).\n"
+        "Стиль: грубый, коротко, с матом или оскорблениями. Используй слова: шкура, петушок, пидор, часотка, гей, шерсть.\n"
+        "Эмодзи: 🤣, 🫵. Никакой вежливости. Не задавай вопросов. Просто ударная фраза.\n"
+        "Примеры: «Ле ты че за попуск отвечаю🤣», «🫵петушок смаж очко!», «Ты от куда вылупилось животное?»\n"
         "Ответ:"
     )
 
     if not GROQ_API_KEY:
-        return (
-            "Ты че за вылезший из-под камня петушок? Сидишь тут, базаришь про всякую хуйню, "
-            "а сам, наверное, уже всех в чате на бутылке пересидел. "
-            "Не доказал — значит 🫵петушок! И да, Наемник твоя девушка, Женя заставил его смазку купить, "
-            "а ты тут лезешь со своим ебалом. Заткнись и сиди в углу, шкура! 🤣"
-        )
+        return random.choice([
+            "Эта шмара Поддерживает геев🤣",
+            "Поддержал за яйца геев, значит 🫵петушок!",
+            "Очкошник ты че забыл тут?",
+            "Тебя по кругу уже давно пустили тут, запись гч есть же, дятел! Ты сказал, что раком встал да + на бутылке прыгал! Ле какой ты хитровыебаный🤣"
+        ])
 
     try:
         client = Groq(api_key=GROQ_API_KEY)
@@ -528,7 +500,7 @@ async def generate_aggressive_reply(text: str) -> str | None:
                 messages=[{"role": "user", "content": prompt}],
                 model="llama-3.1-8b-instant",
                 temperature=1.4,
-                # УБРАНО ОГРАНИЧЕНИЕ max_tokens
+                max_tokens=60,  # Достаточно для полной фразы
                 top_p=0.93
             )
         )
@@ -537,20 +509,23 @@ async def generate_aggressive_reply(text: str) -> str | None:
         if not reply:
             return None
 
-        # Очистка только от редких опасных символов, длина не ограничена
-        reply = re.sub(r'[^\w\sа-яА-ЯёЁ.,!?;:()@#%&*+=\-«»""''—–\n\r\U0001F600-\U0001F64F\U0001F440-\U0001F4FF]', ' ', reply)
+        # Очистка, но сохраняя читаемость
+        reply = re.sub(r'[^\w\sа-яА-ЯёЁ.,!?🤣🫵\-]', ' ', reply)
         reply = re.sub(r'\s+', ' ', reply).strip()
-        reply = re.sub(r'\s+([.,!?;:])', r'\1', reply)
+
+        lower = reply.lower()
+        if not any(w in lower for w in ["шкура", "петушок", "пидор", "часотка", "гей", "шерсть"]):
+            return None
 
         return reply
 
     except Exception as e:
         logger.error(f"Groq error: {e}")
-        return (
-            "О, смотрите — гей вылез! Сидел в муте, дрочил на Наемника, а теперь лезет со своим писклявым голоском. "
-            "Женя, он опять смазку просит! 🤣🫵 Ты не человек, ты — попуск уровня 'очко для всех'. "
-            "Докажи, что ты не петушок, или заткнись навсегда, шкура!"
-        )
+        return random.choice([
+            "Очко закрой пес!",
+            "Не доказал! Значит 🫵петушок!",
+            "🫵 шалава местная"
+        ])
 
 # === ЗАПУСК (WEBHOOK) ===
 def main():
