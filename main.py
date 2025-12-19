@@ -31,7 +31,7 @@ FORBIDDEN_TOPICS = [
 ]
 
 # Разрешённые пользователи для агрессивных ответов
-ALLOWED_USER_IDS = {1366160364, 1705831143}
+ALLOWED_USER_IDS = {8462839381}
 
 # Файлы данных (в /tmp — Render позволяет писать туда)
 USERS_FILE = "/tmp/users_cache.json"
