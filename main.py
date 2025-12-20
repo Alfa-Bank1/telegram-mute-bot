@@ -5,7 +5,7 @@ import re
 import time
 import random
 import asyncio
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReactionTypeEmoji
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -20,9 +20,6 @@ from groq import Groq
 ADMIN_USER_IDS = [int(x.strip()) for x in os.getenv("ADMIN_USER_ID", "").split(",") if x.strip()]
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
-# ID пользователя, на чьи сообщения бот ставит реакцию
-REACTION_USER_ID = 7903125620
 
 # Запрещённые темы (семья, религия, национальность)
 FORBIDDEN_TOPICS = [
@@ -318,7 +315,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
-# --- ОБРАБОТЧИК ЛИЧНЫХ СООБЩЕНИЙ ОТ АДМИНА ---
+# --- ОБРАБОТЧИК ЛИЧНЫХ СООБЩЕНИЙ ОТ АДМИНА (НЕ ПЕРЕСЛАННЫХ) ---
 async def admin_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_USER_IDS:
         return
@@ -367,6 +364,50 @@ async def admin_private_message(update: Update, context: ContextTypes.DEFAULT_TY
         else:
             text = f"❌ Ошибка: {err[:100]}"
         await update.message.reply_text(text)
+
+# --- РЕАКЦИИ НА ПЕРЕСЛАННЫЕ СООБЩЕНИЯ ---
+async def handle_forwarded_to_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка пересланных админом сообщений для установки реакции."""
+    if update.effective_user.id not in ADMIN_USER_IDS:
+        return
+
+    msg = update.effective_message
+    if not msg or not msg.forward_from_chat:
+        # Не пересланное сообщение — игнорируем
+        return
+
+    original_chat = msg.forward_from_chat
+    original_message_id = msg.forward_from_message_id
+
+    if not original_chat or not original_message_id:
+        await msg.reply_text("❌ Не удалось определить исходное сообщение.")
+        return
+
+    # Поддерживаемые реакции (эмодзи)
+    reaction = "👍"  # Можно заменить на любую другую
+
+    try:
+        # Устанавливаем реакцию на исходное сообщение
+        await context.bot.set_message_reaction(
+            chat_id=original_chat.id,
+            message_id=original_message_id,
+            reaction=[reaction],
+            is_big=False
+        )
+        await msg.reply_text(f"✅ Реакция `{reaction}` поставлена на сообщение в чате {original_chat.title or original_chat.id}.")
+    except Exception as e:
+        error_text = str(e)
+        if "bot was blocked" in error_text:
+            feedback = "❌ Бот заблокирован в чате."
+        elif "not a member" in error_text or "chat not found" in error_text:
+            feedback = "❌ Бот не состоит в чате."
+        elif "message to react not found" in error_text:
+            feedback = "❌ Сообщение удалено или недоступно."
+        elif "can't set reaction" in error_text:
+            feedback = "❌ У бота нет прав на реакции в этом чате."
+        else:
+            feedback = f"❌ Ошибка: {error_text[:150]}"
+        await msg.reply_text(feedback)
 
 # --- ФУНКЦИЯ БЕЗОПАСНОЙ ГЕНЕРАЦИИ ---
 async def safe_generate_aggressive_reply(text: str) -> str | None:
@@ -417,19 +458,6 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         "username": user.username or "",
     }
     save_users(cache)
-
-    # === СТАВИМ РЕАКЦИЮ НА СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЯ С ID 7903125620 ===
-    if user.id == REACTION_USER_ID:
-        try:
-            reaction = ReactionTypeEmoji(emoji="👍")
-            await context.bot.set_message_reaction(
-                chat_id=chat.id,
-                message_id=msg.message_id,
-                reaction=[reaction],
-                is_big=False
-            )
-        except Exception as e:
-            logger.debug(f"Не удалось поставить реакцию: {e}")
 
     muted = load_muted_users()
     key = (chat.id, user.id)
@@ -584,13 +612,26 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("clear", debug_clear))
     app.add_handler(CallbackQueryHandler(button_handler))
+
+    # Обработка обычных сообщений админа (не пересланных)
     app.add_handler(
         MessageHandler(
-            filters.ChatType.PRIVATE & filters.User(user_id=ADMIN_USER_IDS),
+            filters.ChatType.PRIVATE & filters.User(user_id=ADMIN_USER_IDS) & ~filters.FORWARDED,
             admin_private_message
         ),
         group=1
     )
+
+    # Обработка пересланных сообщений от админа — для реакций
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.PRIVATE & filters.User(user_id=ADMIN_USER_IDS) & filters.FORWARDED,
+            handle_forwarded_to_bot
+        ),
+        group=2
+    )
+
+    # Обработка сообщений в группах
     app.add_handler(
         MessageHandler(filters.ALL & ~filters.COMMAND, handle_group_message),
         group=0
