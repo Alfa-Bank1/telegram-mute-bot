@@ -5,7 +5,7 @@ import re
 import time
 import random
 import asyncio
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReactionTypeEmoji
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -20,6 +20,9 @@ from groq import Groq
 ADMIN_USER_IDS = [int(x.strip()) for x in os.getenv("ADMIN_USER_ID", "").split(",") if x.strip()]
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+# ID пользователя, на чьи сообщения бот ставит реакцию
+REACTION_USER_ID = 7903125620
 
 # Запрещённые темы (семья, религия, национальность)
 FORBIDDEN_TOPICS = [
@@ -193,7 +196,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["mode"] = None
         keyboard = [
             [InlineKeyboardButton("Написать сообщение от бота", callback_data="mode:send")],
-            [InlineKeyboardButton("Невидimый мут пользователя", callback_data="mode:mutelist")],
+            [InlineKeyboardButton("Невидимый мут пользователя", callback_data="mode:mutelist")],
             [back_button()]
         ]
         await query.edit_message_text(
@@ -415,6 +418,19 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     }
     save_users(cache)
 
+    # === СТАВИМ РЕАКЦИЮ НА СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЯ С ID 7903125620 ===
+    if user.id == REACTION_USER_ID:
+        try:
+            reaction = ReactionTypeEmoji(emoji="👍")
+            await context.bot.set_message_reaction(
+                chat_id=chat.id,
+                message_id=msg.message_id,
+                reaction=[reaction],
+                is_big=False
+            )
+        except Exception as e:
+            logger.debug(f"Не удалось поставить реакцию: {e}")
+
     muted = load_muted_users()
     key = (chat.id, user.id)
     is_muted = key in muted and time.time() < muted[key]
@@ -528,7 +544,7 @@ async def generate_aggressive_reply(text: str) -> str | None:
                 messages=[{"role": "user", "content": prompt}],
                 model="llama-3.1-8b-instant",
                 temperature=1.4,
-                max_tokens=50,  # увеличено для полной фразы
+                max_tokens=50,
                 top_p=0.93
             )
         )
@@ -540,12 +556,6 @@ async def generate_aggressive_reply(text: str) -> str | None:
         # Удаляем только потенциально вредоносные символы, но не обрезаем слова
         reply = re.sub(r'[^\w\sа-яА-ЯёЁ.,!?—–\-\"\'\(\)\[\]{}:;…🤣🫵]', '', reply)
         reply = re.sub(r'\s+', ' ', reply).strip()
-
-        # Убираем обрывки в конце
-        if reply.endswith(("и", "а", "о", "е", "у", "ы", "э", "я", "ю", "ь", "ъ")):
-            # Если фраза оканчивается на гласную/мягкий/твёрдый знак — проверим, не обрезанная ли
-            # Но без словаря — просто оставляем как есть, если длина > 10
-            pass
 
         # Проверка на наличие «агрессивных» слов
         lower = reply.lower()
