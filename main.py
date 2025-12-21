@@ -21,6 +21,11 @@ ADMIN_USER_IDS = [int(x.strip()) for x in os.getenv("ADMIN_USER_ID", "").split("
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
+# Файлы данных (в /tmp — Render позволяет писать туда)
+USERS_FILE = "/tmp/users_cache.json"
+MUTED_FILE = "/tmp/invisible_mutes.json"
+LAST_ADMIN_MSG_FILE = "/tmp/last_admin_message.json"  # НОВЫЙ ФАЙЛ
+
 # Запрещённые темы (семья, религия, национальность)
 FORBIDDEN_TOPICS = [
     "мам", "пап", "родител", "семь", "жена", "муж", "ребён", "ребен", "сын", "дочь",
@@ -31,11 +36,7 @@ FORBIDDEN_TOPICS = [
 ]
 
 # Разрешённые пользователи для агрессивных ответов
-ALLOWED_USER_IDS = {8462839381, 6370704218, 7038529593, 527497822, 8180038585, 8349016341}
-
-# Файлы данных (в /tmp — Render позволяет писать туда)
-USERS_FILE = "/tmp/users_cache.json"
-MUTED_FILE = "/tmp/invisible_mutes.json"
+ALLOWED_USER_IDS = {8462839381, 6370704218, 7038529593, 527497822, 8180038585, 8349016341, 5372063362}
 
 # Хранилище активных отложенных задач (по чату и пользователю)
 pending_replies = {}  # {(chat_id, user_id): {"task": task, "message_id": id}}
@@ -81,6 +82,12 @@ def save_muted_users(muted_dict):
     serializable = {f"{chat}:{user}": expiry for (chat, user), expiry in muted_dict.items()}
     save_data(MUTED_FILE, serializable)
 
+def load_last_admin_msg():
+    return load_data(LAST_ADMIN_MSG_FILE, {})
+
+def save_last_admin_msg(data):
+    save_data(LAST_ADMIN_MSG_FILE, data)
+
 # --- ПРОВЕРКА НА ЗАПРЕЩЁННЫЕ ТЕМЫ ---
 def contains_forbidden_topic(text: str) -> bool:
     text_low = text.lower()
@@ -90,7 +97,7 @@ def contains_forbidden_topic(text: str) -> bool:
 async def debug_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_USER_IDS:
         return
-    files_to_remove = [USERS_FILE, MUTED_FILE]
+    files_to_remove = [USERS_FILE, MUTED_FILE, LAST_ADMIN_MSG_FILE]
     removed = []
     for f in files_to_remove:
         if os.path.exists(f):
@@ -139,7 +146,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Выбрать группу", callback_data="select_group")]])
     )
 
-# --- НОВАЯ ФУНКЦИЯ: ЛАЙК НА ПОСЛЕДНЕЕ СООБЩЕНИЕ АДМИНА ---
+# --- ЛАЙК НА ПОСЛЕДНЕЕ СООБЩЕНИЕ АДМИНА (ИСПРАВЛЕНО) ---
 async def like_my_last_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -151,27 +158,16 @@ async def like_my_last_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text("❌ Группа не выбрана.")
         return
 
-    try:
-        # Получаем последние 20 сообщений в чате
-        history = await context.bot.get_chat_history(chat_id=chat_id, limit=20)
-    except Exception as e:
-        logger.error(f"Ошибка получения истории: {e}")
-        await query.edit_message_text("❌ Не удалось получить историю чата.")
+    last_admin = load_last_admin_msg()
+    chat_id_str = str(chat_id)
+    user_id_str = str(user_id)
+
+    if chat_id_str not in last_admin or user_id_str not in last_admin[chat_id_str]:
+        await query.edit_message_text("📭 Ваше последнее сообщение в этой группе не найдено.")
         return
 
-    # Ищем последнее сообщение от админа (ваше)
-    target_message_id = None
-    for msg in history:
-        if msg.from_user and msg.from_user.id == user_id and not msg.from_user.is_bot:
-            if msg.text or msg.caption or msg.photo or msg.video or msg.document:
-                target_message_id = msg.message_id
-                break
+    target_message_id = last_admin[chat_id_str][user_id_str]["message_id"]
 
-    if not target_message_id:
-        await query.edit_message_text("📭 В последних 20 сообщениях нет ваших.")
-        return
-
-    # Ставим лайк
     try:
         await context.bot.set_message_reaction(
             chat_id=chat_id,
@@ -185,9 +181,9 @@ async def like_my_last_message(update: Update, context: ContextTypes.DEFAULT_TYP
         if "not a member" in error:
             text = "❌ Бот не в группе."
         elif "message not found" in error:
-            text = "❌ Сообщение слишком старое или удалено."
+            text = "❌ Сообщение удалено или слишком старое."
         elif "can't set reaction" in error:
-            text = "❌ Нет прав на реакции."
+            text = "❌ У бота нет прав на реакции в этой группе."
         else:
             text = f"❌ Ошибка: {error[:100]}"
         await query.edit_message_text(text)
@@ -512,6 +508,18 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         "username": user.username or "",
     }
     save_users(cache)
+
+    # === Сохраняем последнее сообщение админа в группе ===
+    if user.id in ADMIN_USER_IDS and (msg.text or msg.caption or msg.photo or msg.video or msg.document):
+        last_admin = load_last_admin_msg()
+        chat_id_str = str(chat.id)
+        if chat_id_str not in last_admin:
+            last_admin[chat_id_str] = {}
+        last_admin[chat_id_str][str(user.id)] = {
+            "message_id": msg.message_id,
+            "timestamp": time.time()
+        }
+        save_last_admin_msg(last_admin)
 
     muted = load_muted_users()
     key = (chat.id, user.id)
