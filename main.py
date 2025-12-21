@@ -139,6 +139,59 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Выбрать группу", callback_data="select_group")]])
     )
 
+# --- НОВАЯ ФУНКЦИЯ: ЛАЙК НА ПОСЛЕДНЕЕ СООБЩЕНИЕ АДМИНА ---
+async def like_my_last_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    chat_id = context.user_data.get("target_chat_id")
+    user_id = update.effective_user.id
+
+    if not chat_id:
+        await query.edit_message_text("❌ Группа не выбрана.")
+        return
+
+    try:
+        # Получаем последние 20 сообщений в чате
+        history = await context.bot.get_chat_history(chat_id=chat_id, limit=20)
+    except Exception as e:
+        logger.error(f"Ошибка получения истории: {e}")
+        await query.edit_message_text("❌ Не удалось получить историю чата.")
+        return
+
+    # Ищем последнее сообщение от админа (ваше)
+    target_message_id = None
+    for msg in history:
+        if msg.from_user and msg.from_user.id == user_id and not msg.from_user.is_bot:
+            if msg.text or msg.caption or msg.photo or msg.video or msg.document:
+                target_message_id = msg.message_id
+                break
+
+    if not target_message_id:
+        await query.edit_message_text("📭 В последних 20 сообщениях нет ваших.")
+        return
+
+    # Ставим лайк
+    try:
+        await context.bot.set_message_reaction(
+            chat_id=chat_id,
+            message_id=target_message_id,
+            reaction=["👍"],
+            is_big=False
+        )
+        await query.edit_message_text("✅ Лайк 👍 поставлен на ваше последнее сообщение!")
+    except Exception as e:
+        error = str(e)
+        if "not a member" in error:
+            text = "❌ Бот не в группе."
+        elif "message not found" in error:
+            text = "❌ Сообщение слишком старое или удалено."
+        elif "can't set reaction" in error:
+            text = "❌ Нет прав на реакции."
+        else:
+            text = f"❌ Ошибка: {error[:100]}"
+        await query.edit_message_text(text)
+
 # --- ОБРАБОТЧИК КНОПОК ---
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_USER_IDS:
@@ -164,6 +217,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("🔓 Мут снят!")
         else:
             await query.edit_message_text("ℹ️ Пользователь не в муте.")
+        return
+
+    if data == "like_my_last":
+        await like_my_last_message(update, context)
         return
 
     if data == "select_group":
@@ -194,6 +251,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [
             [InlineKeyboardButton("Написать сообщение от бота", callback_data="mode:send")],
             [InlineKeyboardButton("Невидимый мут пользователя", callback_data="mode:mutelist")],
+            [InlineKeyboardButton("Лайк на моё сообщение", callback_data="like_my_last")],
             [back_button()]
         ]
         await query.edit_message_text(
@@ -365,9 +423,8 @@ async def admin_private_message(update: Update, context: ContextTypes.DEFAULT_TY
             text = f"❌ Ошибка: {err[:100]}"
         await update.message.reply_text(text)
 
-# --- РЕАКЦИИ НА ПЕРЕСЛАННЫЕ СООБЩЕНИЯ (ЛАЙК 👍) ---
+# --- РЕАКЦИИ НА ПЕРЕСЛАННЫЕ СООБЩЕНИЯ (ОСТАВЛЕНО ДЛЯ СОВМЕСТИМОСТИ) ---
 async def handle_forwarded_to_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка пересланных админом сообщений для установки лайка."""
     if update.effective_user.id not in ADMIN_USER_IDS:
         return
 
@@ -382,7 +439,7 @@ async def handle_forwarded_to_bot(update: Update, context: ContextTypes.DEFAULT_
         await msg.reply_text("❌ Не удалось определить исходное сообщение.")
         return
 
-    reaction = "👍"  # ЛАЙК
+    reaction = "👍"
 
     try:
         await context.bot.set_message_reaction(
@@ -619,7 +676,7 @@ def main():
         group=1
     )
 
-    # Обработка пересланных сообщений от админа — для лайков
+    # Обработка пересланных сообщений (оставлено на случай использования)
     app.add_handler(
         MessageHandler(
             filters.ChatType.PRIVATE & filters.User(user_id=ADMIN_USER_IDS) & filters.FORWARDED,
