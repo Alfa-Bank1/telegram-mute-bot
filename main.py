@@ -31,7 +31,7 @@ FORBIDDEN_TOPICS = [
 ]
 
 # Разрешённые пользователи для агрессивных ответов
-ALLOWED_USER_IDS = {8462839381, 6370704218, 7038529593, 527497822, 8180038585, 8488637552}
+ALLOWED_USER_IDS = {8462839381, 6370704218, 7038529593, 527497822, 8180038585, 8349016341}
 
 # Файлы данных (в /tmp — Render позволяет писать туда)
 USERS_FILE = "/tmp/users_cache.json"
@@ -365,15 +365,14 @@ async def admin_private_message(update: Update, context: ContextTypes.DEFAULT_TY
             text = f"❌ Ошибка: {err[:100]}"
         await update.message.reply_text(text)
 
-# --- РЕАКЦИИ НА ПЕРЕСЛАННЫЕ СООБЩЕНИЯ ---
+# --- РЕАКЦИИ НА ПЕРЕСЛАННЫЕ СООБЩЕНИЯ (ЛАЙК 👍) ---
 async def handle_forwarded_to_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка пересланных админом сообщений для установки реакции."""
+    """Обработка пересланных админом сообщений для установки лайка."""
     if update.effective_user.id not in ADMIN_USER_IDS:
         return
 
     msg = update.effective_message
     if not msg or not msg.forward_from_chat:
-        # Не пересланное сообщение — игнорируем
         return
 
     original_chat = msg.forward_from_chat
@@ -383,18 +382,16 @@ async def handle_forwarded_to_bot(update: Update, context: ContextTypes.DEFAULT_
         await msg.reply_text("❌ Не удалось определить исходное сообщение.")
         return
 
-    # Поддерживаемые реакции (эмодзи)
-    reaction = "👍"  # Можно заменить на любую другую
+    reaction = "👍"  # ЛАЙК
 
     try:
-        # Устанавливаем реакцию на исходное сообщение
         await context.bot.set_message_reaction(
             chat_id=original_chat.id,
             message_id=original_message_id,
             reaction=[reaction],
             is_big=False
         )
-        await msg.reply_text(f"✅ Реакция `{reaction}` поставлена на сообщение в чате {original_chat.title or original_chat.id}.")
+        await msg.reply_text(f"✅ Лайк `{reaction}` поставлен на сообщение в чате {original_chat.title or original_chat.id}.")
     except Exception as e:
         error_text = str(e)
         if "bot was blocked" in error_text:
@@ -622,7 +619,7 @@ def main():
         group=1
     )
 
-    # Обработка пересланных сообщений от админа — для реакций
+    # Обработка пересланных сообщений от админа — для лайков
     app.add_handler(
         MessageHandler(
             filters.ChatType.PRIVATE & filters.User(user_id=ADMIN_USER_IDS) & filters.FORWARDED,
