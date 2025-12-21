@@ -24,7 +24,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 # Файлы данных (в /tmp — Render позволяет писать туда)
 USERS_FILE = "/tmp/users_cache.json"
 MUTED_FILE = "/tmp/invisible_mutes.json"
-LAST_ADMIN_MSG_FILE = "/tmp/last_admin_message.json"  # НОВЫЙ ФАЙЛ
+LAST_ADMIN_MSG_FILE = "/tmp/last_admin_message.json"
 
 # Запрещённые темы (семья, религия, национальность)
 FORBIDDEN_TOPICS = [
@@ -36,7 +36,7 @@ FORBIDDEN_TOPICS = [
 ]
 
 # Разрешённые пользователи для агрессивных ответов
-ALLOWED_USER_IDS = {8462839381, 6370704218, 7038529593, 527497822, 8180038585, 8349016341, 5372063362, 6194116904, 1645451702}
+ALLOWED_USER_IDS = {8462839381, 6370704218, 7038529593, 527497822, 8180038585, 8349016341, 5372063362, 6194116904, 1645451702, 8488637552}
 
 # Хранилище активных отложенных задач (по чату и пользователю)
 pending_replies = {}  # {(chat_id, user_id): {"task": task, "message_id": id}}
@@ -146,11 +146,30 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Выбрать группу", callback_data="select_group")]])
     )
 
-# --- ЛАЙК НА ПОСЛЕДНЕЕ СООБЩЕНИЕ АДМИНА (ИСПРАВЛЕНО) ---
-async def like_my_last_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- ВЫБОР РЕАКЦИИ ---
+async def choose_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
+    chat_id = context.user_data.get("target_chat_id")
+    if not chat_id:
+        await query.edit_message_text("❌ Группа не выбрана.")
+        return
+
+    reactions = ["👍", "💯", "😁", "🔥"]
+    keyboard = [
+        [InlineKeyboardButton(emoji, callback_data=f"like_choose:{emoji}")]
+        for emoji in reactions
+    ]
+    keyboard.append([back_button()])
+    await query.edit_message_text("Выберите реакцию:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+# --- ПОСТАВИТЬ ВЫБРАННУЮ РЕАКЦИЮ ---
+async def set_chosen_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    reaction = query.data.split(":", 1)[1]
     chat_id = context.user_data.get("target_chat_id")
     user_id = update.effective_user.id
 
@@ -172,10 +191,10 @@ async def like_my_last_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await context.bot.set_message_reaction(
             chat_id=chat_id,
             message_id=target_message_id,
-            reaction=["👍"],
+            reaction=[reaction],
             is_big=False
         )
-        await query.edit_message_text("✅ Лайк 👍 поставлен на ваше последнее сообщение!")
+        await query.edit_message_text(f"✅ Реакция {reaction} поставлена на ваше последнее сообщение!")
     except Exception as e:
         error = str(e)
         if "not a member" in error:
@@ -216,7 +235,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "like_my_last":
-        await like_my_last_message(update, context)
+        await choose_reaction(update, context)
+        return
+
+    if data.startswith("like_choose:"):
+        await set_chosen_reaction(update, context)
         return
 
     if data == "select_group":
@@ -531,7 +554,6 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         except:
             pass
 
-        # === Пользователь в муте: ответ через 10 сек, БЕЗ отметки ===
         async def delayed_reply_muted():
             await asyncio.sleep(10)
             if user.id in ALLOWED_USER_IDS:
@@ -572,20 +594,17 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         pending_replies[task_key] = {"task": asyncio.create_task(delayed_reply_muted()), "message_id": msg.message_id}
         return
 
-    # === Обычный пользователь ИЗ СПИСКА ALLOWED_USER_IDS ===
     if user.id in ALLOWED_USER_IDS:
         text = (msg.text or msg.caption or "").strip()
         if not text or contains_forbidden_topic(text):
             return
 
-        # Отмена предыдущей задачи (если есть)
         task_key = (chat.id, user.id)
         if task_key in pending_replies:
             pending_replies[task_key]["task"].cancel()
 
         async def delayed_reply_normal():
             await asyncio.sleep(10)
-            # Убедимся, что задача не была отменена
             if task_key in pending_replies and pending_replies[task_key]["task"].done():
                 return
             reply_text = await safe_generate_aggressive_reply(text)
@@ -607,21 +626,25 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
 # --- ГЕНЕРАЦИЯ АГРЕССИВНОГО ОТВЕТА ЧЕРЕЗ GROQ ---
 async def generate_aggressive_reply(text: str) -> str | None:
     prompt = (
-        f"Пользователь написал: {text}\n"
-        "Ты — агрессивный тролль в чате. Ответь ОДНОЙ законченной фразой без уважения, грубо.\n"
-        "Используй резкие слова: шкура, петушок, пидор, шерсть, гей, часотка, попуск, пидрила, дебил, мудила.\n"
+        "Ты — резкий, грубый, но грамотный тролль в чате. Ответь ОДНОЙ завершённой фразой на русском языке.\n"
+        "Фраза должна быть короткой (не больше одного предложения), без обрывов, без ошибок, полностью дописанной.\n"
+        "Можно использовать грубую лексику, но:\n"
+        "- Максимум ДВА оскорбительных слова в фразе (например: 'петушок', 'шкура', 'пидр', 'дебил', 'мудила', 'часотка', 'шерсть').\n"
+        "- Слова 'шкура', 'пидр', 'пидор', 'пидрила' — использовать редко, только если очень уместно.\n"
+        "- НЕ упоминай семью, религию, национальность.\n"
         "Можно эмодзи: 🤣, 🫵\n"
-        "Фраза должна быть полной, без обрезанных слов, без многоточий, без обрывков.\n"
-        "Не упоминай семью, религию или национальность.\n"
-        "Ответ:"
+        "Фраза должна заканчиваться точкой, восклицанием или вопросом.\n"
+        f"Сообщение пользователя: {text}\n"
+        "Твой ответ:"
     )
 
     if not GROQ_API_KEY:
         return random.choice([
-            "Эта шмара Поддерживает геев🤣",
-            "Поддержал за яйца геев, значит 🫵петушок!",
-            "Очкошник ты че забыл тут?",
-            "Тебя по кругу уже давно пустили тут, запись гч есть же, дятел! Ты сказал, что раком встал да + на бутылке прыгал! Ле какой ты хитровыебаный🤣"
+            "Петушок, опять пишешь? 🫵",
+            "Шкура, молчи, пока не поздно! 🤣",
+            "Пидр, докажи, что не попуск!",
+            "Дебил, подумай головой, часотка!",
+            "Ты шерсть или петушок — определись уже! 🫵",
         ])
 
     try:
@@ -633,8 +656,8 @@ async def generate_aggressive_reply(text: str) -> str | None:
             lambda: client.chat.completions.create(
                 messages=[{"role": "user", "content": prompt}],
                 model="llama-3.1-8b-instant",
-                temperature=1.4,
-                max_tokens=50,
+                temperature=1.2,
+                max_tokens=60,
                 top_p=0.93
             )
         )
@@ -643,26 +666,51 @@ async def generate_aggressive_reply(text: str) -> str | None:
         if not reply:
             return None
 
-        # Удаляем только потенциально вредоносные символы, но не обрезаем слова
+        # Очистка от мусора
         reply = re.sub(r'[^\w\sа-яА-ЯёЁ.,!?—–\-\"\'\(\)\[\]{}:;…🤣🫵]', '', reply)
         reply = re.sub(r'\s+', ' ', reply).strip()
 
-        # Проверка на наличие «агрессивных» слов
-        lower = reply.lower()
-        if not any(w in lower for w in ["шкура", "петушок", "пидор", "часотка", "гей", "шерсть", "попуск", "пидрила", "мудила", "дебил"]):
+        # Должна быть на русском
+        if not re.search(r'[а-яА-ЯёЁ]', reply):
             return None
+
+        # Список всех оскорбительных слов
+        rude_words = [
+            "шкура", "пидр", "пидор", "пидрила", "петушок", "дебил", "мудила",
+            "лох", "попуск", "шерсть", "часотка", "гей", "очкошник"
+        ]
+
+        # Подсчёт количества оскорблений
+        lower_reply = reply.lower()
+        count = sum(1 for word in rude_words if word in lower_reply)
+
+        if count > 2:
+            return None
+
+        # Если есть редкие слова — снижаем шанс принятия
+        rare_words = ["шкура", "пидр", "пидор", "пидрила"]
+        rare_count = sum(1 for w in rare_words if w in lower_reply)
+        if rare_count > 0 and random.random() < 0.4:
+            return None
+
+        # Завершённость фразы
+        if not re.search(r'[.!?]$', reply):
+            reply += "!"
 
         return reply
 
     except Exception as e:
         logger.error(f"Groq error: {e}")
-        return random.choice([
-            "Очко закрой пес!",
-            "Не доказал! Значит 🫵петушок!",
-            "🫵 шалава местная",
-            "Ты че, на ментовской помойке вырос, шерсть?",
-            "Ле какой ты заднеприводный пидрила поганый🤣"
-        ])
+        fallbacks = [
+            "Петушок, молчи! 🫵",
+            "Шкура, не лезь, пока не наказали!",
+            "Пидр, докажи или сиди тихо! 🤣",
+            "Ты шерсть или дебил? Определись!",
+            "Часотка, тебе что-то надо снова?",
+            "Мудила, подумай перед тем как писать!",
+            "Опять лезет этот петушок! 🫵",
+        ]
+        return random.choice(fallbacks)
 
 # === ЗАПУСК (WEBHOOK) ===
 def main():
@@ -675,7 +723,6 @@ def main():
     app.add_handler(CommandHandler("clear", debug_clear))
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    # Обработка обычных сообщений админа (не пересланных)
     app.add_handler(
         MessageHandler(
             filters.ChatType.PRIVATE & filters.User(user_id=ADMIN_USER_IDS) & ~filters.FORWARDED,
@@ -684,7 +731,6 @@ def main():
         group=1
     )
 
-    # Обработка пересланных сообщений (оставлено на случай использования)
     app.add_handler(
         MessageHandler(
             filters.ChatType.PRIVATE & filters.User(user_id=ADMIN_USER_IDS) & filters.FORWARDED,
@@ -693,7 +739,6 @@ def main():
         group=2
     )
 
-    # Обработка сообщений в группах
     app.add_handler(
         MessageHandler(filters.ALL & ~filters.COMMAND, handle_group_message),
         group=0
